@@ -1,0 +1,75 @@
+use std.io_runtime
+
+# Subscription/recurring billing — create, retry on failure, dunning.
+# Refs: Stripe Subscriptions, Hyperswitch revenue recovery.
+
+enum SubscriptionStatus:
+    Active
+    PastDue
+    Canceled
+    Trialing
+    Paused
+
+enum BillingInterval:
+    Monthly
+    Yearly
+    Weekly
+
+struct SubscriptionPlan:
+    val plan_id: text
+    val plan_name: text
+    val amount_cents: int
+    val currency: text
+    val interval: BillingInterval
+
+struct Subscription:
+    val sub_id: text
+    val customer_id: text
+    val plan: SubscriptionPlan
+    val payment_token: text
+    val sub_status: SubscriptionStatus
+    val current_period_start: int
+    val current_period_end: int
+    val retry_count: int
+    val max_retries: int
+
+fn create_subscription(customer_id: text, plan: SubscriptionPlan, token: text, start_time: int) -> Subscription:
+    val period_end = _calc_period_end(start_time, plan.interval)
+    val sid = "sub_" + customer_id + "_" + plan.plan_id
+    return Subscription {
+        sub_id: sid,
+        customer_id: customer_id,
+        plan: plan,
+        payment_token: token,
+        sub_status: SubscriptionStatus.Active,
+        current_period_start: start_time,
+        current_period_end: period_end,
+        retry_count: 0,
+        max_retries: 3
+    }
+
+fn subscription_is_due(sub: Subscription, now: int) -> bool:
+    return now >= sub.current_period_end and sub.sub_status == SubscriptionStatus.Active
+
+fn subscription_charge_success(sub: Subscription, now: int) -> Subscription:
+    val new_start = sub.current_period_end
+    val new_end = _calc_period_end(new_start, sub.plan.interval)
+    return Subscription { sub_id: sub.sub_id, customer_id: sub.customer_id, plan: sub.plan, payment_token: sub.payment_token, sub_status: SubscriptionStatus.Active, current_period_start: new_start, current_period_end: new_end, retry_count: 0, max_retries: sub.max_retries }
+
+fn subscription_charge_failed(sub: Subscription) -> Subscription:
+    val new_retries = sub.retry_count + 1
+    if new_retries >= sub.max_retries:
+        return Subscription { sub_id: sub.sub_id, customer_id: sub.customer_id, plan: sub.plan, payment_token: sub.payment_token, sub_status: SubscriptionStatus.Canceled, current_period_start: sub.current_period_start, current_period_end: sub.current_period_end, retry_count: new_retries, max_retries: sub.max_retries }
+    return Subscription { sub_id: sub.sub_id, customer_id: sub.customer_id, plan: sub.plan, payment_token: sub.payment_token, sub_status: SubscriptionStatus.PastDue, current_period_start: sub.current_period_start, current_period_end: sub.current_period_end, retry_count: new_retries, max_retries: sub.max_retries }
+
+fn subscription_cancel(sub: Subscription) -> Subscription:
+    return Subscription { sub_id: sub.sub_id, customer_id: sub.customer_id, plan: sub.plan, payment_token: sub.payment_token, sub_status: SubscriptionStatus.Canceled, current_period_start: sub.current_period_start, current_period_end: sub.current_period_end, retry_count: sub.retry_count, max_retries: sub.max_retries }
+
+fn subscription_pause(sub: Subscription) -> Subscription:
+    return Subscription { sub_id: sub.sub_id, customer_id: sub.customer_id, plan: sub.plan, payment_token: sub.payment_token, sub_status: SubscriptionStatus.Paused, current_period_start: sub.current_period_start, current_period_end: sub.current_period_end, retry_count: sub.retry_count, max_retries: sub.max_retries }
+
+fn _calc_period_end(start: int, interval: BillingInterval) -> int:
+    if interval == BillingInterval.Weekly: return start + 604800
+    if interval == BillingInterval.Monthly: return start + 2592000
+    if interval == BillingInterval.Yearly: return start + 31536000
+    return start + 2592000

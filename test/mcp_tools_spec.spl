@@ -1,0 +1,201 @@
+use std.spec
+use std.io_runtime
+
+struct McpToolSchema:
+    val tool_name: text
+    val description: text
+    val input_schema: text
+
+fn payment_charge_schema() -> McpToolSchema:
+    return McpToolSchema { tool_name: "payment.charge", description: "Charge a payment method", input_schema: "{}" }
+
+fn payment_refund_schema() -> McpToolSchema:
+    return McpToolSchema { tool_name: "payment.refund", description: "Refund a transaction", input_schema: "{}" }
+
+fn payment_list_methods_schema() -> McpToolSchema:
+    return McpToolSchema { tool_name: "payment.list_methods", description: "List stored payment methods", input_schema: "{}" }
+
+fn payment_add_card_schema() -> McpToolSchema:
+    return McpToolSchema { tool_name: "payment.add_card", description: "Add a payment card", input_schema: "{}" }
+
+fn payment_status_schema() -> McpToolSchema:
+    return McpToolSchema { tool_name: "payment.status", description: "Check transaction status", input_schema: "{}" }
+
+fn list_payment_tools() -> list<McpToolSchema>:
+    var tools = []
+    tools.push(payment_charge_schema())
+    tools.push(payment_refund_schema())
+    tools.push(payment_list_methods_schema())
+    tools.push(payment_add_card_schema())
+    tools.push(payment_status_schema())
+    return tools
+
+struct RateLimitConfig:
+    val max_requests: int
+    val window_seconds: int
+
+struct RateLimitEntry:
+    val agent_id: text
+    val method: text
+    val timestamps: list<int>
+
+struct RateLimiter:
+    val entries: list<RateLimitEntry>
+    val default_config: RateLimitConfig
+
+fn new_rate_limiter(max_requests: int, window_seconds: int) -> RateLimiter:
+    return RateLimiter { entries: [], default_config: RateLimitConfig { max_requests: max_requests, window_seconds: window_seconds } }
+
+fn _find_entry(limiter: RateLimiter, agent_id: text, method: text) -> RateLimitEntry:
+    var i = 0
+    while i < limiter.entries.length():
+        val e = limiter.entries[i]
+        if e.agent_id == agent_id and e.method == method:
+            return e
+        i = i + 1
+    return RateLimitEntry { agent_id: agent_id, method: method, timestamps: [] }
+
+fn _count_in_window(timestamps: list<int>, now: int, window: int) -> int:
+    val cutoff = now - window
+    var count = 0
+    var i = 0
+    while i < timestamps.length():
+        if timestamps[i] >= cutoff:
+            count = count + 1
+        i = i + 1
+    return count
+
+fn rate_limit_check(limiter: RateLimiter, agent_id: text, method: text, now: int) -> bool:
+    val entry = _find_entry(limiter, agent_id, method)
+    val used = _count_in_window(entry.timestamps, now, limiter.default_config.window_seconds)
+    return used < limiter.default_config.max_requests
+
+fn rate_limit_record(limiter: RateLimiter, agent_id: text, method: text, now: int) -> RateLimiter:
+    var found = false
+    var new_entries = []
+    var i = 0
+    while i < limiter.entries.length():
+        val e = limiter.entries[i]
+        if e.agent_id == agent_id and e.method == method:
+            found = true
+            var new_ts = e.timestamps
+            new_ts.push(now)
+            new_entries.push(RateLimitEntry { agent_id: agent_id, method: method, timestamps: new_ts })
+        else:
+            new_entries.push(e)
+        i = i + 1
+    if !found:
+        new_entries.push(RateLimitEntry { agent_id: agent_id, method: method, timestamps: [now] })
+    return RateLimiter { entries: new_entries, default_config: limiter.default_config }
+
+fn rate_limit_remaining(limiter: RateLimiter, agent_id: text, method: text, now: int) -> int:
+    val entry = _find_entry(limiter, agent_id, method)
+    val used = _count_in_window(entry.timestamps, now, limiter.default_config.window_seconds)
+    val rem = limiter.default_config.max_requests - used
+    if rem < 0: return 0
+    return rem
+
+enum AuthzDecision:
+    Approved
+    Denied
+    PendingHuman
+
+struct AuthzRequest:
+    val agent_id: text
+    val action: text
+    val amount_cents: int
+    val currency: text
+    val token: text
+    val reason: text
+
+struct AuthzResult:
+    val decision: AuthzDecision
+    val request_id: text
+    val message: text
+
+struct AuthzConfig:
+    val auto_approve_threshold_cents: int
+    val blocked_agents: list<text>
+
+fn new_authz_config(auto_threshold: int) -> AuthzConfig:
+    return AuthzConfig { auto_approve_threshold_cents: auto_threshold, blocked_agents: [] }
+
+fn _is_blocked_agent(config: AuthzConfig, agent_id: text) -> bool:
+    var i = 0
+    while i < config.blocked_agents.length():
+        if config.blocked_agents[i] == agent_id:
+            return true
+        i = i + 1
+    return false
+
+fn authz_evaluate(config: AuthzConfig, req: AuthzRequest) -> AuthzResult:
+    if _is_blocked_agent(config, req.agent_id):
+        return AuthzResult { decision: AuthzDecision.Denied, request_id: "", message: "agent blocked" }
+    if req.action == "list" or req.action == "status":
+        return AuthzResult { decision: AuthzDecision.Approved, request_id: "auto", message: "read-only" }
+    if req.amount_cents <= config.auto_approve_threshold_cents:
+        return AuthzResult { decision: AuthzDecision.Approved, request_id: "auto", message: "below threshold" }
+    return AuthzResult { decision: AuthzDecision.PendingHuman, request_id: "authz_pending", message: "human required" }
+
+fn authz_human_approve(req_id: text) -> AuthzResult:
+    return AuthzResult { decision: AuthzDecision.Approved, request_id: req_id, message: "human approved" }
+
+fn authz_human_deny(req_id: text, reason: text) -> AuthzResult:
+    return AuthzResult { decision: AuthzDecision.Denied, request_id: req_id, message: "denied: " + reason }
+
+describe "MCP tools + rate limiter + authz":
+    describe "MCP tool schemas":
+        it "list_payment_tools returns 5 tools":
+            expect list_payment_tools().length() == 5
+        it "charge schema has correct name":
+            expect payment_charge_schema().tool_name == "payment.charge"
+        it "refund schema has correct name":
+            expect payment_refund_schema().tool_name == "payment.refund"
+        it "list_methods schema has correct name":
+            expect payment_list_methods_schema().tool_name == "payment.list_methods"
+    describe "rate limiter":
+        it "new limiter allows requests":
+            expect rate_limit_check(new_rate_limiter(3, 60), "a1", "charge", 1000) == true
+        it "allows up to max_requests":
+            var rl = new_rate_limiter(3, 60)
+            rl = rate_limit_record(rl, "a1", "charge", 1000)
+            rl = rate_limit_record(rl, "a1", "charge", 1001)
+            rl = rate_limit_record(rl, "a1", "charge", 1002)
+            expect rate_limit_check(rl, "a1", "charge", 1003) == false
+        it "blocks after max exceeded":
+            var rl = new_rate_limiter(2, 60)
+            rl = rate_limit_record(rl, "a1", "charge", 100)
+            rl = rate_limit_record(rl, "a1", "charge", 101)
+            expect rate_limit_check(rl, "a1", "charge", 102) == false
+        it "expired timestamps dont count":
+            var rl = new_rate_limiter(2, 60)
+            rl = rate_limit_record(rl, "a1", "charge", 900)
+            expect rate_limit_check(rl, "a1", "charge", 1000) == true
+        it "remaining decreases":
+            var rl = new_rate_limiter(5, 60)
+            expect rate_limit_remaining(rl, "a1", "charge", 100) == 5
+            rl = rate_limit_record(rl, "a1", "charge", 100)
+            expect rate_limit_remaining(rl, "a1", "charge", 100) == 4
+        it "different agents independent":
+            var rl = new_rate_limiter(1, 60)
+            rl = rate_limit_record(rl, "a1", "charge", 100)
+            expect rate_limit_check(rl, "a1", "charge", 101) == false
+            expect rate_limit_check(rl, "a2", "charge", 101) == true
+    describe "authorization flow":
+        it "read-only auto-approved":
+            val r = authz_evaluate(new_authz_config(1000), AuthzRequest { agent_id: "a1", action: "list", amount_cents: 0, currency: "USD", token: "", reason: "" })
+            expect r.decision == AuthzDecision.Approved
+        it "small amounts auto-approved":
+            val r = authz_evaluate(new_authz_config(5000), AuthzRequest { agent_id: "a1", action: "charge", amount_cents: 2000, currency: "USD", token: "tok_x", reason: "" })
+            expect r.decision == AuthzDecision.Approved
+        it "large amounts require human":
+            val r = authz_evaluate(new_authz_config(5000), AuthzRequest { agent_id: "a1", action: "charge", amount_cents: 10000, currency: "USD", token: "tok_x", reason: "" })
+            expect r.decision == AuthzDecision.PendingHuman
+        it "blocked agent denied":
+            val cfg = AuthzConfig { auto_approve_threshold_cents: 5000, blocked_agents: ["bad"] }
+            val r = authz_evaluate(cfg, AuthzRequest { agent_id: "bad", action: "charge", amount_cents: 100, currency: "USD", token: "tok_x", reason: "" })
+            expect r.decision == AuthzDecision.Denied
+        it "human_approve returns Approved":
+            expect authz_human_approve("r1").decision == AuthzDecision.Approved
+        it "human_deny returns Denied":
+            expect authz_human_deny("r1", "nope").decision == AuthzDecision.Denied

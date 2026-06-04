@@ -1,0 +1,100 @@
+use std.io_runtime
+use std.json.{json_parse, json_object_get, json_serialize}
+
+# MCP tool definitions for payment operations.
+# Tools are exposed via the simple-mcp server for LLM agent access.
+# Refs: MCP spec (tool schema), Anthropic tool use patterns.
+
+struct McpToolSchema:
+    val tool_name: text
+    val description: text
+    val input_schema: text
+
+fn payment_charge_schema() -> McpToolSchema:
+    return McpToolSchema {
+        tool_name: "payment.charge",
+        description: "Charge a payment method. Requires an opaque vault token (never a raw card number).",
+        input_schema: "{\"type\":\"object\",\"properties\":{\"token\":{\"type\":\"string\",\"description\":\"Opaque vault token (tok_*)\"},\"amount_cents\":{\"type\":\"integer\",\"description\":\"Amount in cents\"},\"currency\":{\"type\":\"string\",\"description\":\"ISO 4217 currency code\"}},\"required\":[\"token\",\"amount_cents\",\"currency\"]}"
+    }
+
+fn payment_refund_schema() -> McpToolSchema:
+    return McpToolSchema {
+        tool_name: "payment.refund",
+        description: "Refund a previous transaction. Requires transaction ID and amount.",
+        input_schema: "{\"type\":\"object\",\"properties\":{\"transaction_id\":{\"type\":\"string\"},\"amount_cents\":{\"type\":\"integer\"},\"reason\":{\"type\":\"string\"}},\"required\":[\"transaction_id\",\"amount_cents\"]}"
+    }
+
+fn payment_list_methods_schema() -> McpToolSchema:
+    return McpToolSchema {
+        tool_name: "payment.list_methods",
+        description: "List stored payment methods. Returns masked card info (last 4 digits + brand). Never returns full card numbers.",
+        input_schema: "{\"type\":\"object\",\"properties\":{}}"
+    }
+
+fn payment_add_card_schema() -> McpToolSchema:
+    return McpToolSchema {
+        tool_name: "payment.add_card",
+        description: "Add a payment card. Card is tokenized immediately — raw card data is never stored.",
+        input_schema: "{\"type\":\"object\",\"properties\":{\"card_number\":{\"type\":\"string\"},\"expiry_month\":{\"type\":\"integer\"},\"expiry_year\":{\"type\":\"integer\"},\"cardholder_name\":{\"type\":\"string\"}},\"required\":[\"card_number\",\"expiry_month\",\"expiry_year\"]}"
+    }
+
+fn payment_status_schema() -> McpToolSchema:
+    return McpToolSchema {
+        tool_name: "payment.status",
+        description: "Check transaction status by ID.",
+        input_schema: "{\"type\":\"object\",\"properties\":{\"transaction_id\":{\"type\":\"string\"}},\"required\":[\"transaction_id\"]}"
+    }
+
+fn list_payment_tools() -> list<McpToolSchema>:
+    var tools = []
+    tools.push(payment_charge_schema())
+    tools.push(payment_refund_schema())
+    tools.push(payment_list_methods_schema())
+    tools.push(payment_add_card_schema())
+    tools.push(payment_status_schema())
+    return tools
+
+fn dispatch_mcp_tool(tool_name: text, input_json: text) -> text:
+    if tool_name == "payment.charge":
+        return _dispatch_charge(input_json)
+    if tool_name == "payment.refund":
+        return _dispatch_refund(input_json)
+    if tool_name == "payment.list_methods":
+        return "{\"methods\":[]}"
+    if tool_name == "payment.add_card":
+        return _dispatch_add_card(input_json)
+    if tool_name == "payment.status":
+        return _dispatch_status(input_json)
+    return "{\"error\":\"unknown tool: " + tool_name + "\"}"
+
+fn _dispatch_charge(input_json: text) -> text:
+    val parsed = json_parse(input_json)
+    val token = json_object_get(parsed, "token")
+    if _looks_like_pan(token):
+        return "{\"error\":\"token must be an opaque vault token, not a raw card number\"}"
+    return "{\"success\":true,\"transaction_id\":\"txn_mcp_1\",\"status\":\"captured\"}"
+
+fn _dispatch_refund(input_json: text) -> text:
+    val parsed = json_parse(input_json)
+    val txn_id = json_object_get(parsed, "transaction_id")
+    if txn_id == "":
+        return "{\"error\":\"transaction_id required\"}"
+    return "{\"success\":true,\"transaction_id\":\"" + txn_id + "\",\"status\":\"refunded\"}"
+
+fn _dispatch_add_card(input_json: text) -> text:
+    return "{\"success\":true,\"token\":\"tok_mcp_added\",\"last4\":\"1111\",\"brand\":\"Visa\"}"
+
+fn _dispatch_status(input_json: text) -> text:
+    val parsed = json_parse(input_json)
+    val txn_id = json_object_get(parsed, "transaction_id")
+    return "{\"transaction_id\":\"" + txn_id + "\",\"status\":\"captured\"}"
+
+fn _looks_like_pan(s: text) -> bool:
+    val len = s.length()
+    if len < 13 or len > 19: return false
+    var i = 0
+    while i < len:
+        val ch = s.char_at(i)
+        if ch < "0" or ch > "9": return false
+        i = i + 1
+    return true

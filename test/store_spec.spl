@@ -1,0 +1,232 @@
+use std.spec
+use std.io_runtime
+
+fn _dc(d: int) -> text:
+    if d == 0: return "0"
+    if d == 1: return "1"
+    if d == 2: return "2"
+    if d == 3: return "3"
+    if d == 4: return "4"
+    if d == 5: return "5"
+    if d == 6: return "6"
+    if d == 7: return "7"
+    if d == 8: return "8"
+    return "9"
+
+fn _int_to_text(n: int) -> text:
+    if n == 0: return "0"
+    var result = ""
+    var v = n
+    while v > 0:
+        result = _dc(v % 10) + result
+        v = v / 10
+    return result
+
+enum CheckoutState:
+    CartOpen
+    IntentCreated
+    Confirmed
+    Captured
+    Completed
+    Canceled
+    CheckoutFailed
+
+struct CartItem:
+    val item_id: text
+    val item_name: text
+    val quantity: int
+    val unit_price_cents: int
+
+struct Cart:
+    val items: list<CartItem>
+    val customer_id: text
+
+struct CheckoutSession:
+    val session_id: text
+    val cart: Cart
+    val state: CheckoutState
+    val payment_token: text
+    val transaction_id: text
+    val total_cents: int
+    val currency: text
+    val error_message: text
+
+fn cart_total(cart: Cart) -> int:
+    var total = 0
+    var i = 0
+    while i < cart.items.length():
+        total = total + cart.items[i].quantity * cart.items[i].unit_price_cents
+        i = i + 1
+    return total
+
+fn create_checkout_session(cart: Cart, currency: text) -> CheckoutSession:
+    val total = cart_total(cart)
+    if total <= 0:
+        return CheckoutSession { session_id: "", cart: cart, state: CheckoutState.CheckoutFailed, payment_token: "", transaction_id: "", total_cents: 0, currency: currency, error_message: "empty cart" }
+    return CheckoutSession { session_id: "cs_" + _int_to_text(total), cart: cart, state: CheckoutState.CartOpen, payment_token: "", transaction_id: "", total_cents: total, currency: currency, error_message: "" }
+
+fn checkout_set_payment(session: CheckoutSession, token: text) -> CheckoutSession:
+    if session.state != CheckoutState.CartOpen:
+        return CheckoutSession { session_id: session.session_id, cart: session.cart, state: CheckoutState.CheckoutFailed, payment_token: "", transaction_id: "", total_cents: session.total_cents, currency: session.currency, error_message: "not CartOpen" }
+    if token == "":
+        return CheckoutSession { session_id: session.session_id, cart: session.cart, state: CheckoutState.CheckoutFailed, payment_token: "", transaction_id: "", total_cents: session.total_cents, currency: session.currency, error_message: "empty token" }
+    return CheckoutSession { session_id: session.session_id, cart: session.cart, state: CheckoutState.IntentCreated, payment_token: token, transaction_id: "", total_cents: session.total_cents, currency: session.currency, error_message: "" }
+
+fn checkout_confirm(session: CheckoutSession) -> CheckoutSession:
+    if session.state != CheckoutState.IntentCreated:
+        return CheckoutSession { session_id: session.session_id, cart: session.cart, state: CheckoutState.CheckoutFailed, payment_token: session.payment_token, transaction_id: "", total_cents: session.total_cents, currency: session.currency, error_message: "not IntentCreated" }
+    return CheckoutSession { session_id: session.session_id, cart: session.cart, state: CheckoutState.Confirmed, payment_token: session.payment_token, transaction_id: "", total_cents: session.total_cents, currency: session.currency, error_message: "" }
+
+fn checkout_capture(session: CheckoutSession) -> CheckoutSession:
+    if session.state != CheckoutState.Confirmed:
+        return CheckoutSession { session_id: session.session_id, cart: session.cart, state: CheckoutState.CheckoutFailed, payment_token: session.payment_token, transaction_id: "", total_cents: session.total_cents, currency: session.currency, error_message: "not Confirmed" }
+    return CheckoutSession { session_id: session.session_id, cart: session.cart, state: CheckoutState.Captured, payment_token: session.payment_token, transaction_id: "txn_store_" + session.session_id, total_cents: session.total_cents, currency: session.currency, error_message: "" }
+
+fn checkout_complete(session: CheckoutSession) -> CheckoutSession:
+    if session.state != CheckoutState.Captured:
+        return CheckoutSession { session_id: session.session_id, cart: session.cart, state: CheckoutState.CheckoutFailed, payment_token: session.payment_token, transaction_id: session.transaction_id, total_cents: session.total_cents, currency: session.currency, error_message: "not Captured" }
+    return CheckoutSession { session_id: session.session_id, cart: session.cart, state: CheckoutState.Completed, payment_token: session.payment_token, transaction_id: session.transaction_id, total_cents: session.total_cents, currency: session.currency, error_message: "" }
+
+fn checkout_cancel(session: CheckoutSession) -> CheckoutSession:
+    if session.state == CheckoutState.Completed or session.state == CheckoutState.Captured:
+        return CheckoutSession { session_id: session.session_id, cart: session.cart, state: CheckoutState.CheckoutFailed, payment_token: session.payment_token, transaction_id: session.transaction_id, total_cents: session.total_cents, currency: session.currency, error_message: "cannot cancel" }
+    return CheckoutSession { session_id: session.session_id, cart: session.cart, state: CheckoutState.Canceled, payment_token: session.payment_token, transaction_id: "", total_cents: session.total_cents, currency: session.currency, error_message: "" }
+
+enum SubscriptionStatus:
+    Active
+    PastDue
+    SubCanceled
+    Trialing
+    Paused
+
+enum BillingInterval:
+    Monthly
+    Yearly
+    Weekly
+
+struct SubscriptionPlan:
+    val plan_id: text
+    val plan_name: text
+    val amount_cents: int
+    val currency: text
+    val interval: BillingInterval
+
+struct Subscription:
+    val sub_id: text
+    val customer_id: text
+    val plan: SubscriptionPlan
+    val payment_token: text
+    val sub_status: SubscriptionStatus
+    val current_period_start: int
+    val current_period_end: int
+    val retry_count: int
+    val max_retries: int
+
+fn _calc_period_end(start: int, interval: BillingInterval) -> int:
+    if interval == BillingInterval.Weekly: return start + 604800
+    if interval == BillingInterval.Monthly: return start + 2592000
+    if interval == BillingInterval.Yearly: return start + 31536000
+    return start + 2592000
+
+fn create_subscription(customer_id: text, plan: SubscriptionPlan, token: text, start_time: int) -> Subscription:
+    return Subscription { sub_id: "sub_" + customer_id + "_" + plan.plan_id, customer_id: customer_id, plan: plan, payment_token: token, sub_status: SubscriptionStatus.Active, current_period_start: start_time, current_period_end: _calc_period_end(start_time, plan.interval), retry_count: 0, max_retries: 3 }
+
+fn subscription_is_due(sub: Subscription, now: int) -> bool:
+    return now >= sub.current_period_end and sub.sub_status == SubscriptionStatus.Active
+
+fn subscription_charge_success(sub: Subscription, now: int) -> Subscription:
+    val ns = sub.current_period_end
+    return Subscription { sub_id: sub.sub_id, customer_id: sub.customer_id, plan: sub.plan, payment_token: sub.payment_token, sub_status: SubscriptionStatus.Active, current_period_start: ns, current_period_end: _calc_period_end(ns, sub.plan.interval), retry_count: 0, max_retries: sub.max_retries }
+
+fn subscription_charge_failed(sub: Subscription) -> Subscription:
+    val nr = sub.retry_count + 1
+    if nr >= sub.max_retries:
+        return Subscription { sub_id: sub.sub_id, customer_id: sub.customer_id, plan: sub.plan, payment_token: sub.payment_token, sub_status: SubscriptionStatus.SubCanceled, current_period_start: sub.current_period_start, current_period_end: sub.current_period_end, retry_count: nr, max_retries: sub.max_retries }
+    return Subscription { sub_id: sub.sub_id, customer_id: sub.customer_id, plan: sub.plan, payment_token: sub.payment_token, sub_status: SubscriptionStatus.PastDue, current_period_start: sub.current_period_start, current_period_end: sub.current_period_end, retry_count: nr, max_retries: sub.max_retries }
+
+fn subscription_cancel(sub: Subscription) -> Subscription:
+    return Subscription { sub_id: sub.sub_id, customer_id: sub.customer_id, plan: sub.plan, payment_token: sub.payment_token, sub_status: SubscriptionStatus.SubCanceled, current_period_start: sub.current_period_start, current_period_end: sub.current_period_end, retry_count: sub.retry_count, max_retries: sub.max_retries }
+
+fn subscription_pause(sub: Subscription) -> Subscription:
+    return Subscription { sub_id: sub.sub_id, customer_id: sub.customer_id, plan: sub.plan, payment_token: sub.payment_token, sub_status: SubscriptionStatus.Paused, current_period_start: sub.current_period_start, current_period_end: sub.current_period_end, retry_count: sub.retry_count, max_retries: sub.max_retries }
+
+describe "Web store — checkout + subscriptions":
+    describe "checkout":
+        it "cart_total sums items":
+            val cart = Cart { items: [CartItem { item_id: "a", item_name: "Widget", quantity: 2, unit_price_cents: 500 }, CartItem { item_id: "b", item_name: "Gadget", quantity: 1, unit_price_cents: 1200 }], customer_id: "c1" }
+            expect cart_total(cart) == 2200
+        it "empty cart returns 0":
+            expect cart_total(Cart { items: [], customer_id: "c1" }) == 0
+        it "create session with valid cart":
+            val s = create_checkout_session(Cart { items: [CartItem { item_id: "a", item_name: "X", quantity: 1, unit_price_cents: 1000 }], customer_id: "c1" }, "USD")
+            expect s.state == CheckoutState.CartOpen
+            expect s.total_cents == 1000
+        it "create session with empty cart fails":
+            expect create_checkout_session(Cart { items: [], customer_id: "c1" }, "USD").state == CheckoutState.CheckoutFailed
+        it "full checkout flow":
+            var s = create_checkout_session(Cart { items: [CartItem { item_id: "x", item_name: "Book", quantity: 1, unit_price_cents: 2500 }], customer_id: "c1" }, "USD")
+            s = checkout_set_payment(s, "tok_visa")
+            expect s.state == CheckoutState.IntentCreated
+            s = checkout_confirm(s)
+            expect s.state == CheckoutState.Confirmed
+            s = checkout_capture(s)
+            expect s.state == CheckoutState.Captured
+            expect s.transaction_id != ""
+            s = checkout_complete(s)
+            expect s.state == CheckoutState.Completed
+        it "set_payment empty token fails":
+            val s = create_checkout_session(Cart { items: [CartItem { item_id: "a", item_name: "X", quantity: 1, unit_price_cents: 100 }], customer_id: "c1" }, "USD")
+            expect checkout_set_payment(s, "").state == CheckoutState.CheckoutFailed
+        it "confirm on CartOpen fails":
+            val s = create_checkout_session(Cart { items: [CartItem { item_id: "a", item_name: "X", quantity: 1, unit_price_cents: 100 }], customer_id: "c1" }, "USD")
+            expect checkout_confirm(s).state == CheckoutState.CheckoutFailed
+        it "cancel before capture":
+            var s = create_checkout_session(Cart { items: [CartItem { item_id: "a", item_name: "X", quantity: 1, unit_price_cents: 100 }], customer_id: "c1" }, "USD")
+            s = checkout_set_payment(s, "tok_x")
+            expect checkout_cancel(s).state == CheckoutState.Canceled
+        it "cancel after capture fails":
+            var s = create_checkout_session(Cart { items: [CartItem { item_id: "a", item_name: "X", quantity: 1, unit_price_cents: 100 }], customer_id: "c1" }, "USD")
+            s = checkout_set_payment(s, "tok_x")
+            s = checkout_confirm(s)
+            s = checkout_capture(s)
+            expect checkout_cancel(s).state == CheckoutState.CheckoutFailed
+    describe "subscriptions":
+        it "create returns Active":
+            val plan = SubscriptionPlan { plan_id: "p1", plan_name: "M", amount_cents: 999, currency: "USD", interval: BillingInterval.Monthly }
+            expect create_subscription("c1", plan, "tok", 1000000).sub_status == SubscriptionStatus.Active
+        it "monthly period_end = start + 2592000":
+            val plan = SubscriptionPlan { plan_id: "p1", plan_name: "M", amount_cents: 999, currency: "USD", interval: BillingInterval.Monthly }
+            expect create_subscription("c1", plan, "tok", 1000000).current_period_end == 3592000
+        it "yearly period_end = start + 31536000":
+            val plan = SubscriptionPlan { plan_id: "p2", plan_name: "Y", amount_cents: 9999, currency: "USD", interval: BillingInterval.Yearly }
+            expect create_subscription("c1", plan, "tok", 1000000).current_period_end == 32536000
+        it "is_due true when past period_end":
+            val plan = SubscriptionPlan { plan_id: "p1", plan_name: "M", amount_cents: 999, currency: "USD", interval: BillingInterval.Monthly }
+            expect subscription_is_due(create_subscription("c1", plan, "tok", 100), 2592200) == true
+        it "is_due false before period_end":
+            val plan = SubscriptionPlan { plan_id: "p1", plan_name: "M", amount_cents: 999, currency: "USD", interval: BillingInterval.Monthly }
+            expect subscription_is_due(create_subscription("c1", plan, "tok", 100), 500) == false
+        it "charge_success advances period":
+            val plan = SubscriptionPlan { plan_id: "p1", plan_name: "M", amount_cents: 999, currency: "USD", interval: BillingInterval.Monthly }
+            val sub = create_subscription("c1", plan, "tok", 100)
+            val sub2 = subscription_charge_success(sub, 2592200)
+            expect sub2.current_period_start == sub.current_period_end
+            expect sub2.retry_count == 0
+        it "first charge_failed sets PastDue":
+            val plan = SubscriptionPlan { plan_id: "p1", plan_name: "M", amount_cents: 999, currency: "USD", interval: BillingInterval.Monthly }
+            val sub2 = subscription_charge_failed(create_subscription("c1", plan, "tok", 100))
+            expect sub2.sub_status == SubscriptionStatus.PastDue
+            expect sub2.retry_count == 1
+        it "max retries cancels":
+            val plan = SubscriptionPlan { plan_id: "p1", plan_name: "M", amount_cents: 999, currency: "USD", interval: BillingInterval.Monthly }
+            var sub = create_subscription("c1", plan, "tok", 100)
+            sub = subscription_charge_failed(sub)
+            sub = subscription_charge_failed(sub)
+            sub = subscription_charge_failed(sub)
+            expect sub.sub_status == SubscriptionStatus.SubCanceled
+        it "cancel sets SubCanceled":
+            val plan = SubscriptionPlan { plan_id: "p1", plan_name: "M", amount_cents: 999, currency: "USD", interval: BillingInterval.Monthly }
+            expect subscription_cancel(create_subscription("c1", plan, "tok", 100)).sub_status == SubscriptionStatus.SubCanceled
+        it "pause sets Paused":
+            val plan = SubscriptionPlan { plan_id: "p1", plan_name: "M", amount_cents: 999, currency: "USD", interval: BillingInterval.Monthly }
+            expect subscription_pause(create_subscription("c1", plan, "tok", 100)).sub_status == SubscriptionStatus.Paused

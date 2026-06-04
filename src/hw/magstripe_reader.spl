@@ -1,0 +1,105 @@
+use std.io_runtime
+
+# Mag-stripe reader — ISO/IEC 7811 track 1/2 parsing.
+# Refs: ISO 7811, EMV fallback rules, PCI PTS device requirements.
+
+struct Track1Data:
+    val format_code: text
+    val pan: text
+    val cardholder_name: text
+    val expiry: text
+    val service_code: text
+    val discretionary: text
+
+struct Track2Data:
+    val pan: text
+    val expiry: text
+    val service_code: text
+    val discretionary: text
+
+struct MagStripeResult:
+    val success: bool
+    val track1: Track1Data
+    val track2: Track2Data
+    val pan_token: text
+    val error_message: text
+
+fn parse_track1(raw: text) -> Track1Data:
+    if raw.length() < 10:
+        return Track1Data { format_code: "", pan: "", cardholder_name: "", expiry: "", service_code: "", discretionary: "" }
+    var fc = ""
+    var pan = ""
+    var name = ""
+    var exp = ""
+    var svc = ""
+    var disc = ""
+    var section = 0
+    var i = 0
+    while i < raw.length():
+        val ch = raw.char_at(i)
+        if ch == "%":
+            section = 1
+        else if ch == "^" and section == 1:
+            section = 2
+        else if ch == "^" and section == 2:
+            section = 3
+        else if ch == "?":
+            break
+        else:
+            if section == 0:
+                fc = fc + ch
+            else if section == 1:
+                pan = pan + ch
+            else if section == 2:
+                name = name + ch
+            else if section == 3:
+                if exp.length() < 4:
+                    exp = exp + ch
+                else if svc.length() < 3:
+                    svc = svc + ch
+                else:
+                    disc = disc + ch
+        i = i + 1
+    if fc.length() > 0 and fc.char_at(0) == "B":
+        fc = "B"
+    return Track1Data { format_code: fc, pan: pan, cardholder_name: name, expiry: exp, service_code: svc, discretionary: disc }
+
+fn parse_track2(raw: text) -> Track2Data:
+    if raw.length() < 8:
+        return Track2Data { pan: "", expiry: "", service_code: "", discretionary: "" }
+    var pan = ""
+    var exp = ""
+    var svc = ""
+    var disc = ""
+    var section = 0
+    var i = 0
+    while i < raw.length():
+        val ch = raw.char_at(i)
+        if ch == ";":
+            section = 1
+        else if ch == "=" and section == 1:
+            section = 2
+        else if ch == "?":
+            break
+        else:
+            if section == 1:
+                pan = pan + ch
+            else if section == 2:
+                if exp.length() < 4:
+                    exp = exp + ch
+                else if svc.length() < 3:
+                    svc = svc + ch
+                else:
+                    disc = disc + ch
+        i = i + 1
+    return Track2Data { pan: pan, expiry: exp, service_code: svc, discretionary: disc }
+
+fn magstripe_read(track1_raw: text, track2_raw: text) -> MagStripeResult:
+    val t1 = parse_track1(track1_raw)
+    val t2 = parse_track2(track2_raw)
+    val pan = if t1.pan != "": t1.pan else: t2.pan
+    if pan == "":
+        return MagStripeResult { success: false, track1: t1, track2: t2, pan_token: "", error_message: "no PAN found on either track" }
+    val last4 = if pan.length() > 4: pan.substring(pan.length() - 4, pan.length()) else: pan
+    val token = "tok_mag_" + last4
+    return MagStripeResult { success: true, track1: t1, track2: t2, pan_token: token, error_message: "" }

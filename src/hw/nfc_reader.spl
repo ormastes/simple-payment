@@ -1,0 +1,54 @@
+use std.io_runtime
+
+# NFC contactless reader — ISO 14443 tap-to-pay.
+# Refs: EMV Contactless Book A/B, ISO 14443-3/4, Visa payWave, MC PayPass.
+
+enum NfcProtocol:
+    TypeA
+    TypeB
+    FeliCa
+
+struct NfcFieldConfig:
+    val protocol: NfcProtocol
+    val carrier_freq_khz: int
+    val max_power_mw: int
+    val contactless_limit_cents: int
+
+fn default_nfc_config() -> NfcFieldConfig:
+    return NfcFieldConfig { protocol: NfcProtocol.TypeA, carrier_freq_khz: 13560, max_power_mw: 500, contactless_limit_cents: 10000 }
+
+struct NfcDetectResult:
+    val detected: bool
+    val uid: text
+    val protocol: NfcProtocol
+    val ats: text
+
+struct NfcTransactionResult:
+    val success: bool
+    val pan_token: text
+    val cryptogram: text
+    val cvm_performed: bool
+    val error_message: text
+
+fn nfc_poll_for_card(config: NfcFieldConfig) -> NfcDetectResult:
+    return NfcDetectResult { detected: true, uid: "04AABB1122", protocol: config.protocol, ats: "3B8A80" }
+
+fn nfc_contactless_transaction(config: NfcFieldConfig, amount_cents: int) -> NfcTransactionResult:
+    if amount_cents <= 0:
+        return NfcTransactionResult { success: false, pan_token: "", cryptogram: "", cvm_performed: false, error_message: "invalid amount" }
+    val needs_cvm = amount_cents > config.contactless_limit_cents
+    val ppse = select_ppse()
+    val ppse_resp = _simulate_apdu(ppse)
+    if !apdu_success(ppse_resp):
+        return NfcTransactionResult { success: false, pan_token: "", cryptogram: "", cvm_performed: false, error_message: "PPSE select failed" }
+    val gpo_resp = _simulate_apdu(get_processing_options(""))
+    if !apdu_success(gpo_resp):
+        return NfcTransactionResult { success: false, pan_token: "", cryptogram: "", cvm_performed: false, error_message: "GPO failed" }
+    val ac_resp = _simulate_apdu(generate_ac(64, ""))
+    return NfcTransactionResult {
+        success: true,
+        pan_token: "tok_nfc_" + _int_to_text(amount_cents),
+        cryptogram: ac_resp.data,
+        cvm_performed: needs_cvm,
+        error_message: ""
+    }

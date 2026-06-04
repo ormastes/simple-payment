@@ -1,0 +1,122 @@
+use std.io_runtime
+
+# P2PE — Point-to-point encryption for card reader data.
+# Refs: PCI P2PE standard, DUKPT key derivation, SRED requirements.
+
+enum P2peKeyType:
+    Dukpt
+    FixedKey
+    RsaWrapped
+
+struct P2peConfig:
+    val key_type: P2peKeyType
+    val base_derivation_key: text
+    val key_serial_number: text
+    val encryption_counter: int
+
+fn new_p2pe_config(key_type: P2peKeyType, bdk: text, ksn: text) -> P2peConfig:
+    return P2peConfig { key_type: key_type, base_derivation_key: bdk, key_serial_number: ksn, encryption_counter: 0 }
+
+struct P2peEncryptedBlock:
+    val ciphertext: text
+    val ksn: text
+    val counter: int
+    val key_type: P2peKeyType
+
+struct P2peDecryptResult:
+    val success: bool
+    val plaintext: text
+    val error_message: text
+
+fn p2pe_encrypt(config: P2peConfig, plaintext: text) -> P2peEncryptedBlock:
+    val session_key = _derive_session_key(config)
+    val ciphertext = _xor_encrypt_simple(plaintext, session_key)
+    return P2peEncryptedBlock {
+        ciphertext: ciphertext,
+        ksn: config.key_serial_number,
+        counter: config.encryption_counter,
+        key_type: config.key_type
+    }
+
+fn p2pe_decrypt(config: P2peConfig, block: P2peEncryptedBlock) -> P2peDecryptResult:
+    if block.ksn != config.key_serial_number:
+        return P2peDecryptResult { success: false, plaintext: "", error_message: "KSN mismatch" }
+    val session_key = _derive_session_key(config)
+    val plaintext = _xor_encrypt_simple(block.ciphertext, session_key)
+    return P2peDecryptResult { success: true, plaintext: plaintext, error_message: "" }
+
+fn p2pe_increment_counter(config: P2peConfig) -> P2peConfig:
+    return P2peConfig { key_type: config.key_type, base_derivation_key: config.base_derivation_key, key_serial_number: config.key_serial_number, encryption_counter: config.encryption_counter + 1 }
+
+fn _derive_session_key(config: P2peConfig) -> text:
+    val counter_str = _int_to_text(config.encryption_counter)
+    return config.base_derivation_key + counter_str
+
+fn _xor_encrypt_simple(data: text, key: text) -> text:
+    if key == "": return data
+    var result = ""
+    var i = 0
+    while i < data.length():
+        val dv = _simple_ord(data.char_at(i))
+        val kv = _simple_ord(key.char_at(i % key.length()))
+        val xv = _bitxor(dv, kv)
+        result = result + _simple_chr(xv)
+        i = i + 1
+    return result
+
+fn _simple_ord(ch: text) -> int:
+    if ch == " ": return 32
+    if ch == "0": return 48
+    if ch == "1": return 49
+    if ch == "2": return 50
+    if ch == "3": return 51
+    if ch == "4": return 52
+    if ch == "5": return 53
+    if ch == "6": return 54
+    if ch == "7": return 55
+    if ch == "8": return 56
+    if ch == "9": return 57
+    return 65
+
+fn _simple_chr(n: int) -> text:
+    if n >= 48 and n <= 57:
+        val d = n - 48
+        return _digit_char(d)
+    return "_"
+
+fn _digit_char(d: int) -> text:
+    if d == 0: return "0"
+    if d == 1: return "1"
+    if d == 2: return "2"
+    if d == 3: return "3"
+    if d == 4: return "4"
+    if d == 5: return "5"
+    if d == 6: return "6"
+    if d == 7: return "7"
+    if d == 8: return "8"
+    if d == 9: return "9"
+    return "?"
+
+fn _bitxor(a: int, b: int) -> int:
+    var result = 0
+    var bit = 1
+    var aa = a
+    var bb = b
+    while bit <= 256:
+        val ab = aa % 2
+        val bb_mod = bb % 2
+        if ab != bb_mod:
+            result = result + bit
+        aa = aa / 2
+        bb = bb / 2
+        bit = bit * 2
+    return result
+
+fn _int_to_text(n: int) -> text:
+    if n == 0: return "0"
+    var result = ""
+    var v = n
+    while v > 0:
+        result = _digit_char(v % 10) + result
+        v = v / 10
+    return result

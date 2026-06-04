@@ -1,0 +1,98 @@
+use std.io_runtime
+
+# Store checkout flow — cart → payment intent → confirm → capture → receipt.
+# Refs: Stripe Checkout, Shopify checkout flow, Active Merchant purchase.
+
+enum CheckoutState:
+    CartOpen
+    IntentCreated
+    Confirmed
+    Captured
+    Completed
+    Canceled
+    CheckoutFailed
+
+struct CartItem:
+    val item_id: text
+    val item_name: text
+    val quantity: int
+    val unit_price_cents: int
+
+struct Cart:
+    val items: list<CartItem>
+    val customer_id: text
+
+struct CheckoutSession:
+    val session_id: text
+    val cart: Cart
+    val state: CheckoutState
+    val payment_token: text
+    val transaction_id: text
+    val total_cents: int
+    val currency: text
+    val error_message: text
+
+fn cart_total(cart: Cart) -> int:
+    var total = 0
+    var i = 0
+    while i < cart.items.length():
+        val item = cart.items[i]
+        total = total + item.quantity * item.unit_price_cents
+        i = i + 1
+    return total
+
+fn create_checkout_session(cart: Cart, currency: text) -> CheckoutSession:
+    val total = cart_total(cart)
+    if total <= 0:
+        return CheckoutSession { session_id: "", cart: cart, state: CheckoutState.CheckoutFailed, payment_token: "", transaction_id: "", total_cents: 0, currency: currency, error_message: "cart is empty" }
+    val sid = "cs_" + _int_to_text(total)
+    return CheckoutSession { session_id: sid, cart: cart, state: CheckoutState.CartOpen, payment_token: "", transaction_id: "", total_cents: total, currency: currency, error_message: "" }
+
+fn checkout_set_payment(session: CheckoutSession, token: text) -> CheckoutSession:
+    if session.state != CheckoutState.CartOpen:
+        return CheckoutSession { session_id: session.session_id, cart: session.cart, state: CheckoutState.CheckoutFailed, payment_token: "", transaction_id: "", total_cents: session.total_cents, currency: session.currency, error_message: "session not in CartOpen state" }
+    if token == "":
+        return CheckoutSession { session_id: session.session_id, cart: session.cart, state: CheckoutState.CheckoutFailed, payment_token: "", transaction_id: "", total_cents: session.total_cents, currency: session.currency, error_message: "empty payment token" }
+    return CheckoutSession { session_id: session.session_id, cart: session.cart, state: CheckoutState.IntentCreated, payment_token: token, transaction_id: "", total_cents: session.total_cents, currency: session.currency, error_message: "" }
+
+fn checkout_confirm(session: CheckoutSession) -> CheckoutSession:
+    if session.state != CheckoutState.IntentCreated:
+        return CheckoutSession { session_id: session.session_id, cart: session.cart, state: CheckoutState.CheckoutFailed, payment_token: session.payment_token, transaction_id: "", total_cents: session.total_cents, currency: session.currency, error_message: "not in IntentCreated state" }
+    return CheckoutSession { session_id: session.session_id, cart: session.cart, state: CheckoutState.Confirmed, payment_token: session.payment_token, transaction_id: "", total_cents: session.total_cents, currency: session.currency, error_message: "" }
+
+fn checkout_capture(session: CheckoutSession) -> CheckoutSession:
+    if session.state != CheckoutState.Confirmed:
+        return CheckoutSession { session_id: session.session_id, cart: session.cart, state: CheckoutState.CheckoutFailed, payment_token: session.payment_token, transaction_id: "", total_cents: session.total_cents, currency: session.currency, error_message: "not in Confirmed state" }
+    val txn_id = "txn_store_" + session.session_id
+    return CheckoutSession { session_id: session.session_id, cart: session.cart, state: CheckoutState.Captured, payment_token: session.payment_token, transaction_id: txn_id, total_cents: session.total_cents, currency: session.currency, error_message: "" }
+
+fn checkout_complete(session: CheckoutSession) -> CheckoutSession:
+    if session.state != CheckoutState.Captured:
+        return CheckoutSession { session_id: session.session_id, cart: session.cart, state: CheckoutState.CheckoutFailed, payment_token: session.payment_token, transaction_id: session.transaction_id, total_cents: session.total_cents, currency: session.currency, error_message: "not in Captured state" }
+    return CheckoutSession { session_id: session.session_id, cart: session.cart, state: CheckoutState.Completed, payment_token: session.payment_token, transaction_id: session.transaction_id, total_cents: session.total_cents, currency: session.currency, error_message: "" }
+
+fn checkout_cancel(session: CheckoutSession) -> CheckoutSession:
+    if session.state == CheckoutState.Completed or session.state == CheckoutState.Captured:
+        return CheckoutSession { session_id: session.session_id, cart: session.cart, state: CheckoutState.CheckoutFailed, payment_token: session.payment_token, transaction_id: session.transaction_id, total_cents: session.total_cents, currency: session.currency, error_message: "cannot cancel completed/captured session" }
+    return CheckoutSession { session_id: session.session_id, cart: session.cart, state: CheckoutState.Canceled, payment_token: session.payment_token, transaction_id: "", total_cents: session.total_cents, currency: session.currency, error_message: "" }
+
+fn _int_to_text(n: int) -> text:
+    if n == 0: return "0"
+    var result = ""
+    var v = n
+    while v > 0:
+        result = _dc(v % 10) + result
+        v = v / 10
+    return result
+
+fn _dc(d: int) -> text:
+    if d == 0: return "0"
+    if d == 1: return "1"
+    if d == 2: return "2"
+    if d == 3: return "3"
+    if d == 4: return "4"
+    if d == 5: return "5"
+    if d == 6: return "6"
+    if d == 7: return "7"
+    if d == 8: return "8"
+    return "9"

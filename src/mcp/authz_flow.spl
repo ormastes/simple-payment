@@ -1,0 +1,65 @@
+use std.io_runtime
+
+# Human-in-the-loop authorization flow for agent-initiated payments.
+# Charges above a configurable threshold require explicit human confirmation.
+
+enum AuthzDecision:
+    Approved
+    Denied
+    PendingHuman
+
+struct AuthzRequest:
+    val agent_id: text
+    val action: text
+    val amount_cents: int
+    val currency: text
+    val token: text
+    val reason: text
+
+struct AuthzResult:
+    val decision: AuthzDecision
+    val request_id: text
+    val message: text
+
+struct AuthzConfig:
+    val auto_approve_threshold_cents: int
+    val require_human_above: int
+    val blocked_agents: list<text>
+
+fn new_authz_config(auto_threshold: int) -> AuthzConfig:
+    return AuthzConfig { auto_approve_threshold_cents: auto_threshold, require_human_above: auto_threshold, blocked_agents: [] }
+
+fn authz_evaluate(config: AuthzConfig, req: AuthzRequest) -> AuthzResult:
+    if _is_blocked_agent(config, req.agent_id):
+        return AuthzResult { decision: AuthzDecision.Denied, request_id: "", message: "agent is blocked from payment operations" }
+    if req.action == "list" or req.action == "status":
+        return AuthzResult { decision: AuthzDecision.Approved, request_id: "auto", message: "read-only operations auto-approved" }
+    if req.amount_cents <= config.auto_approve_threshold_cents:
+        return AuthzResult { decision: AuthzDecision.Approved, request_id: "auto", message: "amount below auto-approve threshold" }
+    val req_id = "authz_" + req.agent_id + "_" + _int_to_text(req.amount_cents)
+    return AuthzResult { decision: AuthzDecision.PendingHuman, request_id: req_id, message: "amount exceeds auto-approve threshold (" + _int_to_text(config.auto_approve_threshold_cents) + " cents) — human approval required" }
+
+fn authz_human_approve(req_id: text) -> AuthzResult:
+    return AuthzResult { decision: AuthzDecision.Approved, request_id: req_id, message: "human approved" }
+
+fn authz_human_deny(req_id: text, reason: text) -> AuthzResult:
+    return AuthzResult { decision: AuthzDecision.Denied, request_id: req_id, message: "human denied: " + reason }
+
+fn _is_blocked_agent(config: AuthzConfig, agent_id: text) -> bool:
+    var i = 0
+    while i < config.blocked_agents.length():
+        if config.blocked_agents[i] == agent_id:
+            return true
+        i = i + 1
+    return false
+
+fn _int_to_text(n: int) -> text:
+    if n == 0: return "0"
+    var result = ""
+    var v = n
+    while v > 0:
+        val d = v % 10
+        val ch = if d == 0: "0" else if d == 1: "1" else if d == 2: "2" else if d == 3: "3" else if d == 4: "4" else if d == 5: "5" else if d == 6: "6" else if d == 7: "7" else if d == 8: "8" else: "9"
+        result = ch + result
+        v = v / 10
+    return result

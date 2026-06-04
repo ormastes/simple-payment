@@ -1,0 +1,72 @@
+use std.io_runtime
+
+# Rate limiter — per-agent, per-method sliding window.
+# Prevents abuse of payment operations by LLM agents.
+
+struct RateLimitConfig:
+    val max_requests: int
+    val window_seconds: int
+
+struct RateLimitEntry:
+    val agent_id: text
+    val method: text
+    val timestamps: list<int>
+
+struct RateLimiter:
+    val entries: list<RateLimitEntry>
+    val default_config: RateLimitConfig
+
+fn new_rate_limiter(max_requests: int, window_seconds: int) -> RateLimiter:
+    return RateLimiter {
+        entries: [],
+        default_config: RateLimitConfig { max_requests: max_requests, window_seconds: window_seconds }
+    }
+
+fn rate_limit_check(limiter: RateLimiter, agent_id: text, method: text, now: int) -> bool:
+    val entry = _find_entry(limiter, agent_id, method)
+    val valid = _count_in_window(entry.timestamps, now, limiter.default_config.window_seconds)
+    return valid < limiter.default_config.max_requests
+
+fn rate_limit_record(limiter: RateLimiter, agent_id: text, method: text, now: int) -> RateLimiter:
+    var found = false
+    var new_entries = []
+    var i = 0
+    while i < limiter.entries.length():
+        val e = limiter.entries[i]
+        if e.agent_id == agent_id and e.method == method:
+            found = true
+            var new_ts = e.timestamps
+            new_ts.push(now)
+            new_entries.push(RateLimitEntry { agent_id: agent_id, method: method, timestamps: new_ts })
+        else:
+            new_entries.push(e)
+        i = i + 1
+    if !found:
+        new_entries.push(RateLimitEntry { agent_id: agent_id, method: method, timestamps: [now] })
+    return RateLimiter { entries: new_entries, default_config: limiter.default_config }
+
+fn rate_limit_remaining(limiter: RateLimiter, agent_id: text, method: text, now: int) -> int:
+    val entry = _find_entry(limiter, agent_id, method)
+    val used = _count_in_window(entry.timestamps, now, limiter.default_config.window_seconds)
+    val remaining = limiter.default_config.max_requests - used
+    if remaining < 0: return 0
+    return remaining
+
+fn _find_entry(limiter: RateLimiter, agent_id: text, method: text) -> RateLimitEntry:
+    var i = 0
+    while i < limiter.entries.length():
+        val e = limiter.entries[i]
+        if e.agent_id == agent_id and e.method == method:
+            return e
+        i = i + 1
+    return RateLimitEntry { agent_id: agent_id, method: method, timestamps: [] }
+
+fn _count_in_window(timestamps: list<int>, now: int, window: int) -> int:
+    val cutoff = now - window
+    var count = 0
+    var i = 0
+    while i < timestamps.length():
+        if timestamps[i] >= cutoff:
+            count = count + 1
+        i = i + 1
+    return count

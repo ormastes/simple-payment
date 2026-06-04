@@ -1,0 +1,333 @@
+use std.spec
+use std.io_runtime
+
+fn _int_to_text(n: int) -> text:
+    if n == 0: return "0"
+    var result = ""
+    var v = n
+    if v < 0: v = 0 - v
+    while v > 0:
+        val d = v % 10
+        val ch = if d == 0: "0" else if d == 1: "1" else if d == 2: "2" else if d == 3: "3" else if d == 4: "4" else if d == 5: "5" else if d == 6: "6" else if d == 7: "7" else if d == 8: "8" else: "9"
+        result = ch + result
+        v = v / 10
+    if n < 0: return "-" + result
+    return result
+
+struct ApduCommand:
+    val cla: int
+    val ins: int
+    val p1: int
+    val p2: int
+    val data: text
+    val le: int
+
+struct ApduResponse:
+    val sw1: int
+    val sw2: int
+    val data: text
+
+fn apdu_success(resp: ApduResponse) -> bool:
+    return resp.sw1 == 144 and resp.sw2 == 0
+
+fn select_ppse() -> ApduCommand:
+    return ApduCommand { cla: 0, ins: 164, p1: 4, p2: 0, data: "325041592E5359532E4444463031", le: 0 }
+
+fn select_aid(aid: text) -> ApduCommand:
+    return ApduCommand { cla: 0, ins: 164, p1: 4, p2: 0, data: aid, le: 0 }
+
+fn get_processing_options(pdol: text) -> ApduCommand:
+    return ApduCommand { cla: 128, ins: 168, p1: 0, p2: 0, data: pdol, le: 0 }
+
+fn read_record(sfi: int, record: int) -> ApduCommand:
+    val p2 = sfi * 8 + 4
+    return ApduCommand { cla: 0, ins: 178, p1: record, p2: p2, data: "", le: 0 }
+
+fn generate_ac(ac_type: int, data: text) -> ApduCommand:
+    return ApduCommand { cla: 128, ins: 174, p1: ac_type, p2: 0, data: data, le: 0 }
+
+fn verify_pin(pin_block: text) -> ApduCommand:
+    return ApduCommand { cla: 0, ins: 32, p1: 0, p2: 128, data: pin_block, le: 0 }
+
+fn _simulate_apdu(cmd: ApduCommand) -> ApduResponse:
+    if cmd.ins == 164: return ApduResponse { sw1: 144, sw2: 0, data: "6F" }
+    if cmd.ins == 168: return ApduResponse { sw1: 144, sw2: 0, data: "80" }
+    if cmd.ins == 178: return ApduResponse { sw1: 144, sw2: 0, data: "70" }
+    if cmd.ins == 174: return ApduResponse { sw1: 144, sw2: 0, data: "TC_CRYPTO" }
+    if cmd.ins == 32: return ApduResponse { sw1: 144, sw2: 0, data: "" }
+    return ApduResponse { sw1: 105, sw2: 0, data: "" }
+
+struct EmvResult:
+    val success: bool
+    val pan_token: text
+    val auth_code: text
+    val aid: text
+    val app_label: text
+    val cryptogram: text
+    val error_message: text
+
+fn emv_transaction_flow(amount: int, unpredict: int) -> EmvResult:
+    val ppse_resp = _simulate_apdu(select_ppse())
+    if !apdu_success(ppse_resp):
+        return EmvResult { success: false, pan_token: "", auth_code: "", aid: "", app_label: "", cryptogram: "", error_message: "PPSE failed" }
+    val aid_str = "A0000000041010"
+    val sel_resp = _simulate_apdu(select_aid(aid_str))
+    if !apdu_success(sel_resp):
+        return EmvResult { success: false, pan_token: "", auth_code: "", aid: aid_str, app_label: "", cryptogram: "", error_message: "AID failed" }
+    val gpo_resp = _simulate_apdu(get_processing_options(""))
+    val rec_resp = _simulate_apdu(read_record(1, 1))
+    val ac_resp = _simulate_apdu(generate_ac(64, ""))
+    return EmvResult { success: true, pan_token: "tok_emv_" + _int_to_text(amount), auth_code: "AUTH" + _int_to_text(unpredict), aid: aid_str, app_label: "VISA DEBIT", cryptogram: ac_resp.data, error_message: "" }
+
+enum NfcProtocol:
+    TypeA
+    TypeB
+    FeliCa
+
+struct NfcFieldConfig:
+    val protocol: NfcProtocol
+    val carrier_freq_khz: int
+    val max_power_mw: int
+    val contactless_limit_cents: int
+
+fn default_nfc_config() -> NfcFieldConfig:
+    return NfcFieldConfig { protocol: NfcProtocol.TypeA, carrier_freq_khz: 13560, max_power_mw: 500, contactless_limit_cents: 10000 }
+
+struct NfcTransactionResult:
+    val success: bool
+    val pan_token: text
+    val cryptogram: text
+    val cvm_performed: bool
+    val error_message: text
+
+fn nfc_contactless_transaction(config: NfcFieldConfig, amount_cents: int) -> NfcTransactionResult:
+    if amount_cents <= 0:
+        return NfcTransactionResult { success: false, pan_token: "", cryptogram: "", cvm_performed: false, error_message: "invalid amount" }
+    val needs_cvm = amount_cents > config.contactless_limit_cents
+    val ac_resp = _simulate_apdu(generate_ac(64, ""))
+    return NfcTransactionResult { success: true, pan_token: "tok_nfc_" + _int_to_text(amount_cents), cryptogram: ac_resp.data, cvm_performed: needs_cvm, error_message: "" }
+
+struct Track1Data:
+    val format_code: text
+    val pan: text
+    val cardholder_name: text
+    val expiry: text
+    val service_code: text
+
+struct Track2Data:
+    val pan: text
+    val expiry: text
+    val service_code: text
+
+fn _find_between(s: text, start_ch: text, end_ch: text, from: int) -> text:
+    var result = ""
+    var found_start = false
+    var i = from
+    while i < s.length():
+        val ch = s.char_at(i)
+        if !found_start and ch == start_ch:
+            found_start = true
+        else if found_start and ch == end_ch:
+            return result
+        else if found_start:
+            result = result + ch
+        i = i + 1
+    return result
+
+fn _find_after(s: text, delim: text, occurrence: int) -> text:
+    var count = 0
+    var i = 0
+    while i < s.length():
+        if s.char_at(i) == delim:
+            count = count + 1
+            if count == occurrence:
+                var result = ""
+                var j = i + 1
+                while j < s.length():
+                    val c = s.char_at(j)
+                    if c == delim or c == "?":
+                        return result
+                    result = result + c
+                    j = j + 1
+                return result
+        i = i + 1
+    return ""
+
+fn parse_track1(raw: text) -> Track1Data:
+    if raw.length() < 10:
+        return Track1Data { format_code: "", pan: "", cardholder_name: "", expiry: "", service_code: "" }
+    val pan_raw = _find_between(raw, "%", "^", 0)
+    val pan = if pan_raw.length() > 0 and pan_raw.char_at(0) == "B": pan_raw.substring(1, pan_raw.length()) else: pan_raw
+    val cname = _find_after(raw, "^", 1)
+    val after_name = _find_after(raw, "^", 2)
+    val exp = if after_name.length() >= 4: after_name.substring(0, 4) else: after_name
+    val svc = if after_name.length() >= 7: after_name.substring(4, 7) else: ""
+    return Track1Data { format_code: "B", pan: pan, cardholder_name: cname, expiry: exp, service_code: svc }
+
+fn parse_track2(raw: text) -> Track2Data:
+    if raw.length() < 8:
+        return Track2Data { pan: "", expiry: "", service_code: "" }
+    val pan = _find_between(raw, ";", "=", 0)
+    val after_eq = _find_between(raw, "=", "?", 0)
+    val exp = if after_eq.length() >= 4: after_eq.substring(0, 4) else: after_eq
+    val svc = if after_eq.length() >= 7: after_eq.substring(4, 7) else: ""
+    return Track2Data { pan: pan, expiry: exp, service_code: svc }
+
+struct MagStripeResult:
+    val success: bool
+    val pan_token: text
+    val error_message: text
+
+fn magstripe_read(t1_raw: text, t2_raw: text) -> MagStripeResult:
+    val t1 = parse_track1(t1_raw)
+    val t2 = parse_track2(t2_raw)
+    val pan = if t1.pan != "": t1.pan else: t2.pan
+    if pan == "":
+        return MagStripeResult { success: false, pan_token: "", error_message: "no PAN" }
+    val last4 = if pan.length() > 4: pan.substring(pan.length() - 4, pan.length()) else: pan
+    return MagStripeResult { success: true, pan_token: "tok_mag_" + last4, error_message: "" }
+
+enum P2peKeyType:
+    Dukpt
+    FixedKey
+    RsaWrapped
+
+struct P2peConfig:
+    val key_type: P2peKeyType
+    val base_derivation_key: text
+    val key_serial_number: text
+    val encryption_counter: int
+
+fn new_p2pe_config(key_type: P2peKeyType, bdk: text, ksn: text) -> P2peConfig:
+    return P2peConfig { key_type: key_type, base_derivation_key: bdk, key_serial_number: ksn, encryption_counter: 0 }
+
+struct P2peEncryptedBlock:
+    val ciphertext: text
+    val ksn: text
+    val counter: int
+
+struct P2peDecryptResult:
+    val success: bool
+    val plaintext: text
+    val error_message: text
+
+fn _digit_val(ch: text) -> int:
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    return 0
+
+fn _digit_ch(d: int) -> text:
+    val m = d % 10
+    val v = if m < 0: m + 10 else: m
+    if v == 0: return "0"
+    if v == 1: return "1"
+    if v == 2: return "2"
+    if v == 3: return "3"
+    if v == 4: return "4"
+    if v == 5: return "5"
+    if v == 6: return "6"
+    if v == 7: return "7"
+    if v == 8: return "8"
+    return "9"
+
+fn _mod_encrypt(data: text, key: text) -> text:
+    if key == "": return data
+    var result = ""
+    var i = 0
+    while i < data.length():
+        val dv = _digit_val(data.char_at(i))
+        val kv = _digit_val(key.char_at(i % key.length()))
+        result = result + _digit_ch(dv + kv)
+        i = i + 1
+    return result
+
+fn _mod_decrypt(data: text, key: text) -> text:
+    if key == "": return data
+    var result = ""
+    var i = 0
+    while i < data.length():
+        val dv = _digit_val(data.char_at(i))
+        val kv = _digit_val(key.char_at(i % key.length()))
+        result = result + _digit_ch(dv - kv + 10)
+        i = i + 1
+    return result
+
+fn _derive_key(config: P2peConfig) -> text:
+    return config.base_derivation_key + _int_to_text(config.encryption_counter)
+
+fn p2pe_encrypt(config: P2peConfig, plaintext: text) -> P2peEncryptedBlock:
+    val ct = _mod_encrypt(plaintext, _derive_key(config))
+    return P2peEncryptedBlock { ciphertext: ct, ksn: config.key_serial_number, counter: config.encryption_counter }
+
+fn p2pe_decrypt(config: P2peConfig, block: P2peEncryptedBlock) -> P2peDecryptResult:
+    if block.ksn != config.key_serial_number:
+        return P2peDecryptResult { success: false, plaintext: "", error_message: "KSN mismatch" }
+    val pt = _mod_decrypt(block.ciphertext, _derive_key(config))
+    return P2peDecryptResult { success: true, plaintext: pt, error_message: "" }
+
+fn p2pe_increment_counter(config: P2peConfig) -> P2peConfig:
+    return P2peConfig { key_type: config.key_type, base_derivation_key: config.base_derivation_key, key_serial_number: config.key_serial_number, encryption_counter: config.encryption_counter + 1 }
+
+describe "HW Terminal — EMV, NFC, magstripe, P2PE":
+    describe "EMV (ISO 7816)":
+        it "apdu_success true for sw1=144 sw2=0":
+            expect apdu_success(ApduResponse { sw1: 144, sw2: 0, data: "" }) == true
+        it "apdu_success false for sw1=105":
+            expect apdu_success(ApduResponse { sw1: 105, sw2: 0, data: "" }) == false
+        it "select_ppse returns INS 164":
+            expect select_ppse().ins == 164
+        it "read_record computes P2 correctly":
+            expect read_record(2, 1).p2 == 20
+        it "full EMV transaction flow succeeds":
+            val r = emv_transaction_flow(5000, 42)
+            expect r.success == true
+            expect r.cryptogram != ""
+            expect r.aid == "A0000000041010"
+    describe "NFC (ISO 14443)":
+        it "default config has 13560 kHz carrier":
+            expect default_nfc_config().carrier_freq_khz == 13560
+        it "contactless succeeds for valid amount":
+            val r = nfc_contactless_transaction(default_nfc_config(), 2500)
+            expect r.success == true
+        it "rejects zero amount":
+            expect nfc_contactless_transaction(default_nfc_config(), 0).success == false
+        it "CVM required above limit":
+            expect nfc_contactless_transaction(default_nfc_config(), 15000).cvm_performed == true
+        it "CVM not required below limit":
+            expect nfc_contactless_transaction(default_nfc_config(), 5000).cvm_performed == false
+    describe "Magstripe (ISO 7811)":
+        it "parse_track1 extracts PAN":
+            expect parse_track1("%B4111111111111111^DOE/JOHN^2812101?").pan == "4111111111111111"
+        it "parse_track1 extracts name":
+            expect parse_track1("%B4111111111111111^DOE/JOHN^2812101?").cardholder_name == "DOE/JOHN"
+        it "parse_track2 extracts PAN and expiry":
+            val t2 = parse_track2(";4111111111111111=2812101?")
+            expect t2.pan == "4111111111111111"
+            expect t2.expiry == "2812"
+        it "magstripe_read creates token":
+            expect magstripe_read("%B4111111111111111^DOE/JOHN^2812?", ";4111111111111111=2812?").pan_token == "tok_mag_1111"
+        it "magstripe_read fails on empty":
+            expect magstripe_read("", "").success == false
+    describe "P2PE":
+        it "encrypt produces non-empty ciphertext":
+            val b = p2pe_encrypt(new_p2pe_config(P2peKeyType.Dukpt, "735291", "8001"), "4111111111111111")
+            expect b.ciphertext != ""
+        it "encrypt+decrypt round-trips":
+            val cfg = new_p2pe_config(P2peKeyType.Dukpt, "735291", "8001")
+            val dec = p2pe_decrypt(cfg, p2pe_encrypt(cfg, "4111111111111111"))
+            expect dec.success == true
+            expect dec.plaintext == "4111111111111111"
+        it "KSN mismatch fails":
+            val c1 = new_p2pe_config(P2peKeyType.Dukpt, "123", "8001")
+            val c2 = new_p2pe_config(P2peKeyType.Dukpt, "123", "9999")
+            expect p2pe_decrypt(c2, p2pe_encrypt(c1, "5500")).success == false
+        it "increment_counter advances":
+            expect p2pe_increment_counter(new_p2pe_config(P2peKeyType.Dukpt, "1", "8")).encryption_counter == 1
